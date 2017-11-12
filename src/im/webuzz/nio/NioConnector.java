@@ -14,9 +14,12 @@ import java.util.List;
 import java.util.TimerTask;
 
 import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SNIHostName;
+import javax.net.ssl.SNIServerName;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLException;
+import javax.net.ssl.SSLParameters;
 import javax.net.ssl.TrustManager;
 //import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
@@ -276,6 +279,19 @@ public class NioConnector {
 		//engine.setEnabledProtocols(NioConfig.sslProtocols);
 		//engine.setEnabledCipherSuites(NioConfig.sslCipherSuites);
 		engine.setEnableSessionCreation(NioConfig.sslSessionCreation);
+
+		if (NioConfig.sslSupportsSNI) {
+			try {
+				SSLParameters sslParameters = engine.getSSLParameters();
+				SNIServerName hostName = new SNIHostName(domain);
+				List<SNIServerName> list = new ArrayList<SNIServerName>();
+				list.add(hostName);
+				sslParameters.setServerNames(list);
+				engine.setSSLParameters(sslParameters);
+			} catch (Throwable e) {
+				e.printStackTrace();
+			}
+		}
 
 		this.closed = false;
 		

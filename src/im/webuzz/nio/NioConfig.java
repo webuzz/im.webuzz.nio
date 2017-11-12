@@ -34,5 +34,7 @@ public class NioConfig {
 		"TLS_ECDH_RSA_WITH_3DES_EDE_CBC_SHA",
 	};
 	public static boolean sslSessionCreation = true;
+	
+	public static boolean sslSupportsSNI = false;
 
 }

@@ -914,6 +914,10 @@ public class NioSelectorThread implements Runnable {
 				this.delegateSSLEngineTasks(socketChannel, engine);
 				break;
 			case NEED_UNWRAP: {
+				if (inOperation == SelectionKey.OP_WRITE) {
+					key.interestOps(SelectionKey.OP_READ);
+					return false;
+				}
 				// Since the handshake needs an unwrap() and we're only in here because of either
 				// a read and a write, we assume(!) we're in here because of a read and that
 				// data is available.
