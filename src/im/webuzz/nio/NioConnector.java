@@ -1,19 +1,15 @@
 package im.webuzz.nio;
 
-import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
-import java.security.KeyStore;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.TimerTask;
 
-import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SNIServerName;
 import javax.net.ssl.SSLContext;
@@ -21,7 +17,6 @@ import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLParameters;
 import javax.net.ssl.TrustManager;
-//import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
 
 public class NioConnector {
@@ -89,10 +84,23 @@ public class NioConnector {
 		this(st, address, port, address, usingSSL, usingAvailableProxy, decoder, processor);
 	}
 	
-	public NioConnector(NioSelectorThread st, String address, int port, String domain, boolean usingSSL, boolean usingAvailableProxy, ProtocolDecoder decoder, INioListener processor) {
-		this.st = st;
+	public NioConnector(NioSelectorThread nst, String address, int port, String domain, boolean usingSSL, boolean usingAvailableProxy, ProtocolDecoder decoder, INioListener processor) {
+		this.st = nst;
 		this.domain = domain;
+		if (domain == null) {
+			this.domain = address;
+		}
+		if (this.domain != null) {
+			int idx = this.domain.lastIndexOf(':');
+			if (idx != -1) {
+				this.domain = this.domain.substring(0, idx);
+			}
+		}
 		this.closed = false;
+
+		//this.inNetBuffer = ByteBuffer.allocate(8192);// = ByteBuffer.allocate(engine.getSession().getPacketBufferSize());
+		this.bufferSize = ByteBufferPool.commonBufferSize;
+
 		if (usingAvailableProxy) {
 			checkProxy();
 		}
@@ -100,29 +108,20 @@ public class NioConnector {
 			this.processor = new NioSocks5Adapter(address, port, usingSSL, decoder, processor);
 			this.usingSSL = false;
 			this.decoder = null;
-			try {
-				this.socket = st.addConnection(socksProxyHost, socksProxyPort);
-			} catch (Throwable e) {
-				e.printStackTrace();
-				this.closed = true;
-				return;
-			}
+			address = socksProxyHost;
+			port = socksProxyPort;
 		} else {
 			this.usingSSL = usingSSL;
 			this.decoder = decoder;
 			this.processor = processor;
-			try {
-				this.socket = st.addConnection(address, port);
-			} catch (Throwable e) {
-				e.printStackTrace();
-				this.closed = true;
-				return;
-			}
 		}
-
-		//this.inNetBuffer = ByteBuffer.allocate(8192);// = ByteBuffer.allocate(engine.getSession().getPacketBufferSize());
-
-		this.bufferSize = ByteBufferPool.commonBufferSize;
+		try {
+			this.socket = st.addConnection(address, port);
+		} catch (Throwable e) {
+			e.printStackTrace();
+			this.closed = true;
+			return;
+		}
 		
 		this.st.sessionMap.put(this.socket, this);
 		
@@ -134,69 +133,48 @@ public class NioConnector {
 		st.send(socket, data);
 	}
 
-	public static SSLContext createSSLContext(boolean clientMode, 
-			String keystore, String password, final String host) throws Exception {
+	public static SSLContext createSSLContext(final String host) throws Exception {
 		// Create/initialize the SSLContext with key material
-		char[] passphrase = password.toCharArray();
-		// First initialize the key and trust material.
-		KeyStore ks = KeyStore.getInstance("JKS");
-		FileInputStream fis = new FileInputStream(keystore);
-		ks.load(fis, passphrase);
 		SSLContext sslContext = SSLContext.getInstance("TLS");
-		
-		if (clientMode) {
-			// TrustManager's decide whether to allow connections.
-//			TrustManagerFactory tmf = TrustManagerFactory.getInstance("SunX509");
-//			tmf.init(ks);
-//			// KeyManager's decide which key material to use.
-//			KeyManagerFactory kmf = KeyManagerFactory.getInstance("SunX509");
-//			kmf.init(ks, passphrase);
-//			sslContext.init(kmf.getKeyManagers(), tmf.getTrustManagers(), null);
-			//*
-			TrustManager[] trustAllCerts = new TrustManager[] {
-					new X509TrustManager() {
-						
-						@Override
-						public X509Certificate[] getAcceptedIssuers() {
-							//System.out.println("getAcceptedIssuers");
-							return null;
+		final NioHostnameVerifier hostVerifier = new NioHostnameVerifier(host);
+		TrustManager[] trustAllCerts = new TrustManager[] {
+				new X509TrustManager() {
+
+					@Override
+					public X509Certificate[] getAcceptedIssuers() {
+						return null;
+					}
+
+					@Override
+					public void checkServerTrusted(X509Certificate[] chains, String authType)
+							throws CertificateException {
+						if (!hostVerifier.verify(host, chains)) {
+							throw new CertificateException("Invalid certificate.");
 						}
-						
-						@Override
-						public void checkServerTrusted(X509Certificate[] chains, String arg1)
-								throws CertificateException {
-							for (X509Certificate cert : chains) {
-								boolean hostTrusted = false;
-								try {
-									VerifyUtils.verify(host, cert);
-									hostTrusted = true;
-								} catch (SSLException e) {
-									e.printStackTrace();
-									throw new CertificateException(e);
-								}
-								cert.checkValidity();
-								if (hostTrusted) {
-									break;
-								}
+						for (X509Certificate cert : chains) {
+							boolean hostTrusted = false;
+							try {
+								VerifyUtils.verify(host, cert);
+								hostTrusted = true;
+							} catch (SSLException e) {
+								e.printStackTrace();
+								throw new CertificateException(e);
+							}
+							cert.checkValidity();
+							if (hostTrusted) {
+								break;
 							}
 						}
-						
-						@Override
-						public void checkClientTrusted(X509Certificate[] arg0, String arg1)
-								throws CertificateException {
-							//System.out.println("checkClientTrusted " + arg0 + " // " + arg1);
-						}
 					}
-			};
-			sslContext.init(null, trustAllCerts, null);
-			// */
-		} else {
-			// KeyManager's decide which key material to use.
-			KeyManagerFactory kmf = KeyManagerFactory.getInstance("SunX509");
-			kmf.init(ks, passphrase);
-			sslContext.init(kmf.getKeyManagers(), null, null);
-		}
-		fis.close();
+
+					@Override
+					public void checkClientTrusted(X509Certificate[] chains, String authType)
+							throws CertificateException {
+						//System.out.println("checkClientTrusted " + chains + " // " + authType);
+					}
+				}
+		};
+		sslContext.init(null, trustAllCerts, null);
 		return sslContext;
 	}
 
@@ -205,25 +183,16 @@ public class NioConnector {
 		//	decoder.reset();
 		//}
 		
-		boolean clientMode = true;
 		if (sslContext == null) {
-			String javaHome = System.getProperty("java.home");
-			StringBuilder buffer = new StringBuilder();
-			buffer.append(javaHome).append(File.separator).append("lib");
-			buffer.append(File.separator).append("security");
-			buffer.append(File.separator).append("cacerts");
-			
-			String keystore = buffer.toString();
-			String password = "changeit";
 			try {
-				sslContext = createSSLContext(clientMode, keystore, password, domain);
+				sslContext = createSSLContext(domain);
 			} catch (Exception e) {
 				e.printStackTrace();
 				return;
 			}
 		}
 		engine = sslContext.createSSLEngine();
-		engine.setUseClientMode(clientMode);
+		engine.setUseClientMode(true);
 		engine.setNeedClientAuth(true);
 		
 		if (enabledProtocols != null) {
@@ -304,43 +273,6 @@ public class NioConnector {
 		this.inAppBuffer = null;
 		this.bufferSize = Math.max(engine.getSession().getPacketBufferSize(), engine.getSession().getApplicationBufferSize());
 		
-		this.handshook = false;
-		usingSSL = true;
-
-		// Create SSL metadata container (this will initialize relevant buffers too)
-
-		try {
-			engine.beginHandshake();
-		} catch (SSLException e) {
-			e.printStackTrace();
-		}
-	
-		int timeout = 30000;
-		if (timeout != 0) {
-			st.getTimer().schedule(newHandshakeTimerTask(), timeout);
-		}
-	}
-
-	public void startSSL(SSLContext context) {
-		if (decoder != null) {
-			decoder.reset();
-		}
-		
-		boolean clientMode = true;
-		engine = context.createSSLEngine();
-		engine.setUseClientMode(clientMode);
-
-		this.closed = false;
-		
-//		this.outNetBuffer = ByteBuffer.allocate(engine.getSession().getPacketBufferSize());
-//		this.inNetBuffer = ByteBuffer.allocate(engine.getSession().getPacketBufferSize());
-//		this.inAppBuffer = ByteBuffer.allocate(engine.getSession().getApplicationBufferSize());
-
-		this.outNetBuffer = null;
-		this.inNetBuffer = null;
-		this.inAppBuffer = null;
-		this.bufferSize = Math.max(engine.getSession().getPacketBufferSize(), engine.getSession().getApplicationBufferSize());
-
 		this.handshook = false;
 		usingSSL = true;
 

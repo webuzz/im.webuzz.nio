@@ -18,8 +18,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.Timer;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+//import java.util.concurrent.ExecutorService;
+//import java.util.concurrent.Executors;
 
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLEngineResult;
@@ -50,7 +50,7 @@ public class NioSelectorThread implements Runnable {
 	
 	private boolean running;
 
-	private ExecutorService exec;
+	//private ExecutorService exec;
 	
 	private String id;
 
@@ -148,7 +148,7 @@ public class NioSelectorThread implements Runnable {
 			e.printStackTrace();
 			return;
 		}
-		exec = Executors.newSingleThreadExecutor(new NamedThreadFactory("NIO Delegated Task Thread"));
+		//exec = Executors.newSingleThreadExecutor(new NamedThreadFactory("NIO Delegated Task Thread"));
 
 		Thread t = new Thread(this, "NIO Selector Thread - " + id);
 		t.setDaemon(true);
@@ -164,6 +164,7 @@ public class NioSelectorThread implements Runnable {
 			return;
 		}
 
+		boolean bufferOverflowed = false;
 		// And queue the data we want written
 		synchronized (this.pendingData) {
 			LinkedList<ByteBuffer> queue = (LinkedList<ByteBuffer>) this.pendingData.get(socket);
@@ -171,12 +172,21 @@ public class NioSelectorThread implements Runnable {
 				queue = new LinkedList<ByteBuffer>();
 				this.pendingData.put(socket, queue);
 			}
-			queue.add(ByteBuffer.wrap(data));
+			int maxBuffered = NioConfig.maxBufferedPackets;
+			if (maxBuffered > 0 && queue.size() > maxBuffered) {
+				bufferOverflowed = true;
+			} else {
+				queue.add(ByteBuffer.wrap(data));
+			}
 		}
 
 		synchronized (this.pendingChanges) {
-			// Indicate we want the interest ops set changed
-			this.pendingChanges.add(new ChangeRequest(socket, ChangeRequest.CHANGEOPS, SelectionKey.OP_WRITE));
+			if (bufferOverflowed) {
+				this.pendingChanges.add(new ChangeRequest(socket, ChangeRequest.CLOSE, -1));
+			} else {
+				// Indicate we want the interest ops set changed
+				this.pendingChanges.add(new ChangeRequest(socket, ChangeRequest.CHANGEOPS, SelectionKey.OP_WRITE));
+			}
 		}
 
 		// Finally, wake up our selecting thread so it can make the required changes
@@ -370,7 +380,7 @@ public class NioSelectorThread implements Runnable {
 		if (timer != null) {
 			timer.cancel();
 		}
-		exec.shutdown();
+		//exec.shutdown();
 	}
 
 	private void printKeyStatus() {
@@ -404,6 +414,7 @@ public class NioSelectorThread implements Runnable {
 			this.pendingChanges.add(new ChangeRequest(socketChannel, ChangeRequest.REGISTER, SelectionKey.OP_CONNECT));
 		}
 		
+		//System.out.println("Add connection " + socketChannel);
 		return socketChannel;
 	}
 
@@ -507,7 +518,7 @@ public class NioSelectorThread implements Runnable {
 				processCount++;
 			} catch (IOException e) {
 				String message = e.getMessage();
-				if (message.indexOf("Connection reset by peer") == -1
+				if (message.indexOf("Connection reset") == -1
 						&& message.indexOf("Broken pipe") == -1
 						&& message.indexOf("closed by the remote host") == -1
 						&& message.indexOf("connection was aborted") == -1) {
@@ -655,6 +666,7 @@ public class NioSelectorThread implements Runnable {
 	}
 
 	private void safeClose(SelectionKey key, SocketChannel socketChannel, boolean remoteClosing) {
+		//System.out.println("Closing: " + socketChannel);
 		if (key == null) {
 			if (socketChannel != null) {
 				sessionMap.remove(socketChannel);
@@ -831,7 +843,7 @@ public class NioSelectorThread implements Runnable {
 			processCount++;
 		} catch (Throwable e) {
 			String message = e.getMessage();
-			if (message != null && message.indexOf("Connection reset by peer") == -1
+			if (message != null && message.indexOf("Connection reset") == -1
 					&& message.indexOf("Broken pipe") == -1
 					&& message.indexOf("connection was forcibly closed") == -1) {
 				e.printStackTrace();
@@ -962,7 +974,9 @@ public class NioSelectorThread implements Runnable {
 						System.out.println("Handshake buffer: " + inNetBuffer.remaining() + " vs " + inAppBuffer.remaining() + " " + inAppBuffer.position());
 						HandshakeStatus hsStatus = engine.getHandshakeStatus();
 						System.out.println("Engine status: " + hsStatus.ordinal() + "/" + hsStatus.name() + " " + hsStatus);
-						throw new SSLException("Handshake unwrap too many times!");
+						if (unwrapCount > 1000010) {
+							throw new SSLException("Handshake unwrap too many times!");
+						}
 					}
 					processCount++;
 					
@@ -1137,8 +1151,8 @@ public class NioSelectorThread implements Runnable {
 	private void delegateSSLEngineTasks(SocketChannel socket, SSLEngine engine) {
 		Runnable task;
 		while ((task = engine.getDelegatedTask()) != null) {
-			// TODO: We could use a thread pool and hand these out. Later.
-			exec.execute(task);
+			//exec.execute(task);
+			task.run(); // Other NIO library run these tasks synchronously
 		}
 		processCount++;
 	}

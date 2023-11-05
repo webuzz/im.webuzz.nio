@@ -37,8 +37,14 @@ public class VerifyUtils {
 		verify(host, cns, subjectAlts, true);
 	}
 
-	public static final void verify(final String host, final String[] cns, final String[] subjectAlts,
+	public static final void verify(String host, final String[] cns, final String[] subjectAlts,
 			final boolean strictWithSubDomains) throws SSLException {
+		if (host != null) {
+			int idx = host.lastIndexOf(':');
+			if (idx != -1) {
+				host = host.substring(0, idx);
+			}
+		}
 		// Build the list of names we're going to check. Our DEFAULT and
 		// STRICT implementations of the HostnameVerifier only use the
 		// first CN provided. All other CNs are ignored.

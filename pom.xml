@@ -3,7 +3,7 @@
 	<modelVersion>4.0.0</modelVersion>
 	<groupId>im.webuzz</groupId>
 	<artifactId>webuzz-nio</artifactId>
-	<version>2.1.0</version>
+	<version>2.1.2</version>
 	<packaging>jar</packaging>
 	<dependencies>
 	</dependencies>
@@ -32,13 +32,9 @@
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-compiler-plugin</artifactId>
+				<version>3.11.0</version>
 				<configuration>
-					<source>1.6</source>
-					<target>1.6</target>
-					<showDeprecation>true</showDeprecation>
-					<showWarnings>true</showWarnings>
-					<executable>${JAVA_HOME}/bin/javac</executable>
-					<fork>true</fork>
+					<release>8</release>
 				</configuration>
 			</plugin>
 			<plugin>
