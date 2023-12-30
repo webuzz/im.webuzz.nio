@@ -508,11 +508,22 @@ public class NioSelectorThread implements Runnable {
 		
 		if (sessionMetadata.inNetBuffer == null) {
 			sessionMetadata.inNetBuffer = ByteBufferPool.getByteBufferFromPool(sessionMetadata.bufferSize);
+			sessionMetadata.inNetBuffer.flip();
 			getPoolCount++;
 		}
+		//boolean existing = false;
 		ByteBuffer inNetBuffer = sessionMetadata.inNetBuffer;
+		if (!inNetBuffer.hasRemaining()) {
+			inNetBuffer.clear();
+			//System.out.println("Read network data to new buffer.");
+		} else {
+			inNetBuffer.position(inNetBuffer.position() + inNetBuffer.remaining());
+			inNetBuffer.limit(inNetBuffer.capacity());
+			//System.out.println("Read network data to existing: " + inNetBuffer.remaining() + " / " + inNetBuffer.position());
+			//existing = true;
+		}
+		int numRead = -1;
 		if (!gotData) {
-			int numRead = -1;
 			try {
 				numRead = socketChannel.read(inNetBuffer);
 				processCount++;
@@ -546,8 +557,15 @@ public class NioSelectorThread implements Runnable {
 			readBytes += numRead;
 		}
 
+		inNetBuffer.flip();
+		/*
+		if (existing) {
+			System.out.println("After reading network data to existing: " + inNetBuffer.remaining() + " / " + inNetBuffer.position());
+			System.out.println(numRead);
+			System.out.println("******");
+		}
+		//*/
 		if (sessionMetadata.usingSSL) {
-			inNetBuffer.flip();
 			if (sessionMetadata.inAppBuffer == null) {
 				sessionMetadata.inAppBuffer = ByteBufferPool.getByteBufferFromPool(sessionMetadata.bufferSize);
 				getPoolCount++;
@@ -600,18 +618,8 @@ public class NioSelectorThread implements Runnable {
 			// Compact our read buffer after we've handled the data instead of before
 			// we read so that during the SSL handshake we can deal with the BUFFER_UNDERFLOW
 			// case by simple waiting for more data (which will be appended into this buffer).
-			if (inNetBuffer.hasRemaining()) {
-				inNetBuffer.compact();
-			} else {
-				//inNetBuffer.clear();
-				if (sessionMetadata.inNetBuffer == inNetBuffer) {
-					sessionMetadata.inNetBuffer = null;
-				}
-				ByteBufferPool.putByteBufferToPool(inNetBuffer);
-				putPoolCount++;
-			}
+			adjustInNetBuffer(inNetBuffer, sessionMetadata);
 		} else { // plain connection
-			inNetBuffer.flip();
 			if (!dataReceived(sessionMetadata, socketChannel, inNetBuffer)) {
 				safeClose(key, socketChannel, false);
 				return;
@@ -724,9 +732,9 @@ public class NioSelectorThread implements Runnable {
 		if (sessionMetadata != null && sessionMetadata.decoder != null) {
 			try {
 				ByteBuffer decodedPacket = sessionMetadata.decoder.decode(null);
-				if (decodedPacket != null) {
-					sessionMetadata.processor.packetReceived(socketChannel, decodedPacket);
-				}
+				//if (decodedPacket != null) {
+				//}
+				sessionMetadata.processor.packetReceived(socketChannel, decodedPacket);
 			} catch (Throwable e) {
 				e.printStackTrace();
 			}
@@ -824,16 +832,14 @@ public class NioSelectorThread implements Runnable {
 		int numWritten = -1;
 		ByteBuffer outNetBuffer = null;
 		if (sessionMetadata.usingSSL) {
+			if (sessionMetadata.outNetBuffer == null) {
+				sessionMetadata.outNetBuffer = ByteBufferPool.getByteBufferFromPool(sessionMetadata.bufferSize);
+				getPoolCount++;
+			}
+			outNetBuffer = sessionMetadata.outNetBuffer;
 			if (buf.hasRemaining()) {
-				if (sessionMetadata.outNetBuffer == null) {
-					sessionMetadata.outNetBuffer = ByteBufferPool.getByteBufferFromPool(sessionMetadata.bufferSize);
-					getPoolCount++;
-				}
-				outNetBuffer = sessionMetadata.outNetBuffer;
 				/*SSLEngineResult result = */sessionMetadata.engine.wrap(buf, outNetBuffer);
 				processCount++;
-			} else {
-				outNetBuffer = sessionMetadata.outNetBuffer; // should always be not null!
 			}
 			outNetBuffer.flip();
 		}
@@ -895,6 +901,24 @@ public class NioSelectorThread implements Runnable {
 		} // end of if-else of partly sent
 	}
 
+	private boolean adjustInNetBuffer(ByteBuffer inNetBuffer, NioConnector sessionMetadata) {
+		if (inNetBuffer.hasRemaining()) {
+			//System.out.println("inNetBuffer remaining: " + inNetBuffer.remaining() + " / " + inNetBuffer.position());
+			inNetBuffer.compact();
+			//System.out.println("inNetBuffer#compact remaining: " + inNetBuffer.remaining() + " / " + inNetBuffer.position());
+			inNetBuffer.flip();
+			//System.out.println("inNetBuffer#flip remaining: " + inNetBuffer.remaining() + " / " + inNetBuffer.position());
+			return true;
+		} else {
+			//inNetBuffer.clear();
+			if (sessionMetadata.inNetBuffer == inNetBuffer) {
+				sessionMetadata.inNetBuffer = null;
+			}
+			ByteBufferPool.putByteBufferToPool(inNetBuffer);
+			putPoolCount++;
+			return false;
+		}
+	}
 	/*
 	 * Return whether SSL handshake is finished and next operation should be performed.
 	 */
@@ -903,6 +927,7 @@ public class NioSelectorThread implements Runnable {
 		SSLEngine engine = sessionMetadata.engine;
 		
 		//SSLEngineResult result;
+		boolean alreadyRead = false;
 		while(true) {
 			switch(engine.getHandshakeStatus()) {
 			case FINISHED:
@@ -923,7 +948,7 @@ public class NioSelectorThread implements Runnable {
 					return false;
 				}
 			case NEED_TASK:
-				this.delegateSSLEngineTasks(socketChannel, engine);
+				this.delegateSSLEngineTasks(engine);
 				break;
 			case NEED_UNWRAP: {
 				if (inOperation == SelectionKey.OP_WRITE) {
@@ -935,27 +960,57 @@ public class NioSelectorThread implements Runnable {
 				// data is available.
 				if (sessionMetadata.inNetBuffer == null) {
 					sessionMetadata.inNetBuffer = ByteBufferPool.getByteBufferFromPool(sessionMetadata.bufferSize);
+					sessionMetadata.inNetBuffer.flip();
 					getPoolCount++;
 				}
 				ByteBuffer inNetBuffer = sessionMetadata.inNetBuffer;
-				int numRead = socketChannel.read(inNetBuffer);
-				if (numRead < 0) {
-					throw new SSLException("Handshake aborted by remote entity (socket closed)");
-				}
-				
-				if (numRead == 0 && engine.getHandshakeStatus() == HandshakeStatus.NEED_UNWRAP) {
-					// Bail so we go back to blocking the selector
+				if (!inNetBuffer.hasRemaining() || !alreadyRead) {
+					boolean existing = false;
+					if (!inNetBuffer.hasRemaining()) {
+						inNetBuffer.clear();
+						//System.out.println("Read network data to new buffer.");
+					} else {
+						inNetBuffer.position(inNetBuffer.position() + inNetBuffer.remaining());
+						inNetBuffer.limit(inNetBuffer.capacity());
+						//System.out.println("Read network data to existing: " + inNetBuffer.remaining() + " / " + inNetBuffer.position());
+						existing = true;
+					}
+					int numRead = socketChannel.read(inNetBuffer);
+					alreadyRead = true;
+					if (numRead < 0) {
+						throw new SSLException("Handshake aborted by remote entity (socket closed)");
+					}
 					
-					// Since we're in here the channel is already registered for OP_READ.
-					// Don't re-queue it since that will needlessly wake up the selecting
-					// thread.
-					key.interestOps(SelectionKey.OP_READ);
-					return false;
+					if (numRead == 0 && engine.getHandshakeStatus() == HandshakeStatus.NEED_UNWRAP) {
+						if (existing) {
+							inNetBuffer.flip();
+						}
+						// Bail so we go back to blocking the selector
+						
+						// Since we're in here the channel is already registered for OP_READ.
+						// Don't re-queue it since that will needlessly wake up the selecting
+						// thread.
+						key.interestOps(SelectionKey.OP_READ);
+						return false;
+					}
+					
+					readBytes += numRead;
+					/*
+					if (existing) {
+						System.out.println("After read network data to existing: " + inNetBuffer.remaining() + " / " + inNetBuffer.position());
+						System.out.println(numRead);
+					}
+					//*/
+					inNetBuffer.flip();
+					/*
+					if (existing) {
+						System.out.println("After #flip read network data to existing: " + inNetBuffer.remaining() + " / " + inNetBuffer.position());
+					}
+					//*/
+				//} else {
+				//	System.out.println("Continue to unwrap with remainings: " + inNetBuffer.remaining() + " / " + inNetBuffer.position());
+				//	System.out.println(alreadyRead);
 				}
-				
-				readBytes += numRead;
-				
-				inNetBuffer.flip();
 				ByteBuffer inAppBuffer = null;
 				if (inNetBuffer.hasRemaining()) {
 					if (sessionMetadata.inAppBuffer == null) {
@@ -964,41 +1019,73 @@ public class NioSelectorThread implements Runnable {
 					}
 					inAppBuffer = sessionMetadata.inAppBuffer;
 				}
-				int unwrapCount = 0;
+				/*
+				//int unwrapCount = 0;
+				int inNetBeforeRemaining = inNetBuffer.remaining();
+				int inNetBeforePosition = inNetBuffer.position();
+				int inAppBeforeRemaining = inAppBuffer.remaining();
+				int inAppBeforePosition = inAppBuffer.position();
+				//*/
+				boolean needWrapping = false;
+				boolean needUnwrapping = false;
 				while (inNetBuffer.hasRemaining()) {
 					SSLEngineResult result = engine.unwrap(inNetBuffer, inAppBuffer);
-					unwrapCount++;
-					if (unwrapCount > 1000000) {
+					/*
+					//unwrapCount++;
+					//if (unwrapCount > 1000)
+					{
 						Status rsStatus = result.getStatus();
-						System.out.println("Handshake status: " + rsStatus.ordinal() + "/" + rsStatus.name() + " " + rsStatus);
+						System.out.println("unwrap status: " + rsStatus.ordinal() + "/" + rsStatus.name() + " " + rsStatus);
 						System.out.println("Handshake buffer: " + inNetBuffer.remaining() + " vs " + inAppBuffer.remaining() + " " + inAppBuffer.position());
 						HandshakeStatus hsStatus = engine.getHandshakeStatus();
 						System.out.println("Engine status: " + hsStatus.ordinal() + "/" + hsStatus.name() + " " + hsStatus);
-						if (unwrapCount > 1000010) {
-							throw new SSLException("Handshake unwrap too many times!");
-						}
+						System.out.println("=======");
+						System.out.println("unwrap status: " + rsStatus.ordinal() + "/" + rsStatus.name() + " " + rsStatus);
+						System.out.println("Handshake inNetBuffer: " + inNetBuffer.remaining() + " " + inNetBuffer.position());
+						System.out.println("Handshake inAppBuffer: " + inAppBuffer.remaining() + " " + inAppBuffer.position());
+						System.out.println("Engine status: " + hsStatus.ordinal() + "/" + hsStatus.name() + " " + hsStatus);
+						System.out.println("Before inNetBuffer: " + inNetBeforeRemaining + " / " + inNetBeforePosition);
+						System.out.println("Before inAppBuffer: " + inAppBeforeRemaining + " / " + inAppBeforePosition);
+						System.out.println("===*===");
+//						if (unwrapCount > 1010) {
+//							throw new SSLException("Handshake unwrap too many times!");
+//						}
 					}
+					//*/
 					processCount++;
 					
 					HandshakeStatus hsStatus = engine.getHandshakeStatus();
 					if (hsStatus == HandshakeStatus.NEED_TASK) {
-						this.delegateSSLEngineTasks(socketChannel, engine);
+						this.delegateSSLEngineTasks(engine);
+						hsStatus = engine.getHandshakeStatus();
+						//System.out.println("After task: ");
+						//System.out.println("Engine status: " + hsStatus.ordinal() + "/" + hsStatus.name() + " " + hsStatus);
+					} else if (hsStatus == HandshakeStatus.NEED_WRAP) {
+						needWrapping = true;
+						/*
+						Status rsStatus = result.getStatus();
+						System.out.println("unwrap status: " + rsStatus.ordinal() + "/" + rsStatus.name() + " " + rsStatus);
+						System.out.println("Handshake inNetBuffer: " + inNetBuffer.remaining() + " " + inNetBuffer.position());
+						System.out.println("Handshake inAppBuffer: " + inAppBuffer.remaining() + " " + inAppBuffer.position());
+						System.out.println("Engine status: " + hsStatus.ordinal() + "/" + hsStatus.name() + " " + hsStatus);
+						System.out.println("Before inNetBuffer: " + inNetBeforeRemaining + " / " + inNetBeforePosition);
+						System.out.println("Before inAppBuffer: " + inAppBeforeRemaining + " / " + inAppBeforePosition);
+						//*/
+						adjustInNetBuffer(inNetBuffer, sessionMetadata);
+						break;
 					}
 					
 					Status rsStatus = result.getStatus();
 					if (rsStatus == Status.BUFFER_UNDERFLOW) {
-						if (inNetBuffer.hasRemaining()) {
-							inNetBuffer.compact();
-						} else {
-							//inNetBuffer.clear();
-							if (sessionMetadata.inNetBuffer == inNetBuffer) {
-								sessionMetadata.inNetBuffer = null;
-							}
-							ByteBufferPool.putByteBufferToPool(inNetBuffer);
-							putPoolCount++;
+						adjustInNetBuffer(inNetBuffer, sessionMetadata);
+						//System.out.println("To read new data from network");
+						if (alreadyRead) {
+							key.interestOps(SelectionKey.OP_READ);
+							return false;
 						}
-						key.interestOps(SelectionKey.OP_READ);
-						return false;
+						//System.out.println("Call case NEED_UNWRAP again");
+						needUnwrapping = true;
+						break;
 					} else if (rsStatus != Status.OK) {
 						if (rsStatus == Status.CLOSED) {
 							throw new SSLException("Handshake closed by remote entity");
@@ -1011,16 +1098,7 @@ public class NioSelectorThread implements Runnable {
 
 					// Status OK
 					if (inAppBuffer.position() > 0) { // A handshake already produces data for us to consume.
-						if (inNetBuffer.hasRemaining()) {
-							inNetBuffer.compact();
-						} else {
-							//inNetBuffer.clear();
-							if (sessionMetadata.inNetBuffer == inNetBuffer) {
-								sessionMetadata.inNetBuffer = null;
-							}
-							ByteBufferPool.putByteBufferToPool(inNetBuffer);
-							putPoolCount++;
-						}
+						adjustInNetBuffer(inNetBuffer, sessionMetadata);
 						sessionMetadata.handshook = true;
 						sessionMetadata.cancelHandshakeTimer();
 						if (sessionMetadata.processor != null) {
@@ -1034,11 +1112,10 @@ public class NioSelectorThread implements Runnable {
 					}
 
 					if (hsStatus == HandshakeStatus.FINISHED || hsStatus == HandshakeStatus.NOT_HANDSHAKING) {
-						if (unwrapCount > 100000) {
-							System.out.println("Handshake unwrap takes " + unwrapCount + " to finish");
-						}
-						if (inNetBuffer.hasRemaining()) {
-							inNetBuffer.compact();
+						//if (unwrapCount > 100000) {
+						//	System.out.println("Handshake unwrap takes " + unwrapCount + " to finish");
+						//}
+						if (adjustInNetBuffer(inNetBuffer, sessionMetadata)) {
 							sessionMetadata.handshook = true;
 							sessionMetadata.cancelHandshakeTimer();
 							if (sessionMetadata.processor != null) {
@@ -1050,12 +1127,6 @@ public class NioSelectorThread implements Runnable {
 							}
 							return true; // continue to read or write data
 						} else {
-							//inNetBuffer.clear();
-							if (sessionMetadata.inNetBuffer == inNetBuffer) {
-								sessionMetadata.inNetBuffer = null;
-							}
-							ByteBufferPool.putByteBufferToPool(inNetBuffer);
-							putPoolCount++;
 							if (sessionMetadata.inAppBuffer == inAppBuffer) {
 								sessionMetadata.inAppBuffer = null;
 							}
@@ -1076,12 +1147,23 @@ public class NioSelectorThread implements Runnable {
 							}
 						}
 					}
-					
 				} // end of while
 				//inNetBuffer.clear();
+				if (needWrapping) {
+					//System.out.println("Switch from NEED_UNWRAP to NEED_WRAP with remainings " + inNetBuffer.remaining() + " / " + inNetBuffer.position());
+					//if (inNetBuffer.remaining() == 199) {
+					//	System.out.println("Debug...");
+					//}
+					break; // break switch and continue with case NEED_WRAP
+				}
+				if (needUnwrapping) {
+					//System.out.println("Run case NEED_UNWRAP remainings " + inNetBuffer.remaining() + " / " + inNetBuffer.position());
+					break; // break switch and continue with case NEED_WRAP
+				}
 				if (sessionMetadata.inNetBuffer == inNetBuffer) {
 					sessionMetadata.inNetBuffer = null;
 				}
+				//System.out.println("!!!!put inNetBuffer back to pool: " + inNetBuffer.remaining() + " / " + inNetBuffer.position());
 				ByteBufferPool.putByteBufferToPool(inNetBuffer);
 				putPoolCount++;
 				if (inAppBuffer != null) {
@@ -1112,6 +1194,7 @@ public class NioSelectorThread implements Runnable {
 
 				// Write the data away
 				int numWritten = socketChannel.write(outNetBuffer);
+				alreadyRead = true; // once write, considered as already read
 				processCount++;
 				if (numWritten < 0) {
 					throw new SSLException("Handshake aborted by remote entity (socket closed)");
@@ -1120,6 +1203,7 @@ public class NioSelectorThread implements Runnable {
 				
 				if (outNetBuffer.hasRemaining()) {
 					outNetBuffer.compact();
+					outNetBuffer.flip();
 					key.interestOps(SelectionKey.OP_WRITE);
 					return false;
 				}
@@ -1133,6 +1217,11 @@ public class NioSelectorThread implements Runnable {
 				putPoolCount++;
 				
 				if (engine.getHandshakeStatus() == HandshakeStatus.NEED_UNWRAP) {
+					ByteBuffer inNetBuffer = sessionMetadata.inNetBuffer;
+					if (inNetBuffer != null && inNetBuffer.hasRemaining()) {
+						//System.out.println("Switching back from NEED_WRAP to NEED_UNWRAP");
+						break; // break and continue to case NEED_UNWRAP
+					}
 					// We need more data (to pass to unwrap(), signal we're interested
 					// in reading on the socket
 					key.interestOps(SelectionKey.OP_READ);
@@ -1148,7 +1237,7 @@ public class NioSelectorThread implements Runnable {
 		}
 	}
 	
-	private void delegateSSLEngineTasks(SocketChannel socket, SSLEngine engine) {
+	private void delegateSSLEngineTasks(SSLEngine engine) {
 		Runnable task;
 		while ((task = engine.getDelegatedTask()) != null) {
 			//exec.execute(task);

@@ -118,6 +118,7 @@ public class NioConnector {
 		try {
 			this.socket = st.addConnection(address, port);
 		} catch (Throwable e) {
+			System.out.println("Failed to add connection " + address + ":" + port);
 			e.printStackTrace();
 			this.closed = true;
 			return;
@@ -347,7 +348,7 @@ public class NioConnector {
 	}
 	
 	public TimerTask newHandshakeTimerTask() {
-		return(this.handshakeTimerTask = new HandshakeTimerTask());
+		return (this.handshakeTimerTask = new HandshakeTimerTask());
 	}
 	
 	public void cancelHandshakeTimer() {
